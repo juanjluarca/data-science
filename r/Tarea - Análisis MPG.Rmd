@@ -1,0 +1,670 @@
+---
+title: "Tarea - Análisis de MPG"
+author: "Juan Luarca"
+date: "2026-10-01"
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(ISLR2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)
+library(knitr)
+
+# Configuraciones
+options(scipen = 999, knitr.kable.NA = "—")
+theme_set(theme_minimal())
+
+# Cargar datos
+data("Auto")
+auto <- Auto %>%
+  mutate(origen = factor(origin, levels = 1:3, labels = c("EE. UU.", "Europa", "Japón")),
+         cilindros = factor(cylinders))
+
+colores_origen <- c("EE. UU." = "#66c2a5", "Europa" = "#fc8d62", "Japón" = "#8da0cb")
+
+# Coeficiente de asimetría (Fisher-Pearson ajustado)
+asimetria <- function(x) {
+  n <- length(x)
+  n / ((n - 1) * (n - 2)) * sum(((x - mean(x)) / sd(x))^3)
+}
+
+# Formato de números para el texto
+fmt <- function(x, d = 2) format(round(x, d), nsmall = d, big.mark = ",")
+```
+
+## Información General
+
+**Objetivo:** Construir e interpretar tablas de distribución de frecuencias para datos agrupados por intervalos de clase, utilizando el dataset `Auto` disponible en ISLR2 en R.
+
+**Reconocimiento del dataset:**
+
+| Variable | Tipo | Descripción | Unidad |
+|---|---|---|---|
+| mpg | Cuantitativa continua | Rendimiento de combustible | millas/galón |
+| cylinders | Cualitativa ordinal | Número de cilindros | - |
+| displacement | Cuantitativa continua | Cilindrada del motor | pulg³ |
+| horsepower | Cuantitativa continua | Potencia | hp |
+| weight | Cuantitativa continua | Peso del vehículo | lb |
+| acceleration | Cuantitativa continua | Aceleración 0-60 mph | s |
+| year | Cualitativa ordinal (temporal) | Año del modelo | año |
+| origin | Cualitativa nominal | País de origen | - |
+| name | Cualitativa nominal | Nombre del auto | - |
+
+**Nota:** En `ISLR2`, `origin` viene codificado numéricamente (1 = EE. UU., 2 = Europa, 3 = Japón), por lo que se convirtió en el factor `origen` con etiquetas de texto. También se creó `cilindros` como factor para las comparaciones entre grupos.
+
+### Primeras filas
+
+```{r primeras-filas}
+head(Auto)
+```
+
+### Estructura
+
+```{r estructura}
+str(Auto)
+```
+
+### Filas y columnas
+
+```{r dimensiones}
+dim(Auto)
+```
+
+### Variables numéricas
+
+```{r variables-numericas}
+variables_numericas <- names(Auto)[sapply(Auto, is.numeric)]
+variables_numericas
+```
+
+### Valores nulos
+
+```{r valores-nulos}
+colSums(is.na(Auto))
+
+# Filas que ISLR2 eliminó por tener horsepower desconocido
+attr(Auto, "na.action")
+```
+
+**Preguntas de exploración inicial:**
+
+| Pregunta | Respuesta |
+|---|---|
+| ¿Cuántas filas y columnas tiene el dataset? | `r nrow(Auto)` filas y `r ncol(Auto)` columnas. |
+| ¿Qué variables numéricas contiene? | `r paste(variables_numericas, collapse = ", ")`. `cylinders`, `year` y `origin` son numéricas en R, pero se tratan como cualitativas. |
+| ¿Existen valores nulos? ¿En qué columnas? | No. ISLR2 ya eliminó los `r length(attr(Auto, "na.action"))` autos con `horsepower` desconocido, por eso el dataset tiene `r nrow(Auto)` filas. |
+| ¿Cuál es la variable que analizaremos? (sugerencia: `mpg`, `horsepower`, `weight`) | `mpg`. |
+
+---
+
+## Paso 1: Selección de la Variable
+
+- [x] `mpg` (rendimiento de combustible)
+- [ ] `horsepower` (caballos de fuerza)
+- [ ] `weight` (peso del vehículo)
+- [ ] `displacement` (cilindrada)
+
+**Variable elegida:** `mpg` (rendimiento de combustible, millas/galón).
+
+```{r seleccion-variable}
+x <- auto$mpg
+head(x)
+```
+
+## Paso 2: Medidas Descriptivas Previas
+
+```{r medidas-descriptivas}
+n <- length(x)
+minimo <- min(x)
+maximo <- max(x)
+rango <- maximo - minimo
+media <- mean(x)
+mediana <- median(x)
+desv <- sd(x)
+cv <- desv / media * 100
+
+medidas <- data.frame(
+  Medida = c("n (tamaño de muestra)", "Mínimo", "Máximo", "Rango (R)", "Media (x̄)",
+             "Mediana", "Desviación estándar (s)", "Coeficiente de variación (CV %)"),
+  Valor = c(n, minimo, maximo, rango, media, mediana, desv, cv)
+)
+kable(medidas, digits = 2)
+```
+
+**Interpretación:**
+
+Se analizaron `r n` vehículos cuyo rendimiento va de `r minimo` a `r maximo` millas/galón, un rango de `r fmt(rango, 1)` mpg entre el auto menos eficiente y el más eficiente.
+
+En promedio, los vehículos rinden `r fmt(media)` mpg y la mitad rinde `r mediana` mpg o menos. Como la media es ligeramente mayor que la mediana, hay un leve sesgo a la derecha causado por algunos autos muy eficientes.
+
+La desviación estándar de `r fmt(desv)` mpg indica que el rendimiento de un auto suele alejarse unas `r round(desv)` millas/galón del promedio.
+
+El CV de `r fmt(cv)` % muestra una dispersión relativa moderada-alta: el dataset reúne vehículos con rendimientos muy distintos.
+
+## Paso 3: Visualización
+
+### Tabla de distribución de frecuencias (regla de Sturges)
+
+```{r clases}
+k <- ceiling(1 + 3.322 * log10(n))          # número de clases
+amplitud <- ceiling(rango / k * 10) / 10    # amplitud redondeada hacia arriba a 1 decimal
+limites <- round(minimo + amplitud * 0:k, 1)
+cat("k =", k, "| amplitud =", amplitud, "\n")
+limites
+```
+
+```{r tabla-frecuencias}
+intervalos <- cut(x, breaks = limites, right = FALSE)
+tabla_frec <- data.frame(table(intervalos)) %>%
+  rename(Intervalo = intervalos, fi = Freq) %>%
+  mutate(xi = (head(limites, -1) + tail(limites, -1)) / 2,
+         fr = fi / n,
+         fa = cumsum(fi),
+         `%` = fr * 100,
+         `% acumulado` = cumsum(`%`)) %>%
+  select(Intervalo, xi, fi, fr, fa, `%`, `% acumulado`)
+kable(tabla_frec, digits = 2)
+```
+
+### Histograma
+
+```{r histograma, fig.width=9, fig.height=5}
+lineas_centrales <- data.frame(
+  medida = c(paste("Media =", fmt(media)), paste("Mediana =", fmt(mediana))),
+  valor = c(media, mediana)
+)
+
+ggplot(auto, aes(x = mpg)) +
+  geom_histogram(breaks = limites, closed = "left", fill = "steelblue", color = "white") +
+  geom_vline(data = lineas_centrales,
+             aes(xintercept = valor, color = medida, linetype = medida), linewidth = 0.8) +
+  scale_color_manual(values = c("darkorange", "black")) +
+  scale_linetype_manual(values = c("dashed", "dotted")) +
+  scale_x_continuous(breaks = limites) +
+  labs(title = "Distribución del rendimiento de combustible de los vehículos",
+       x = "Rendimiento de combustible (millas/galón)",
+       y = "Número de vehículos (fi)",
+       color = NULL, linetype = NULL) +
+  theme(panel.grid.minor = element_blank())
+```
+
+### Gráfico de líneas (porcentaje acumulado)
+
+```{r ojiva, fig.width=9, fig.height=5}
+ojiva <- data.frame(limite = limites, pct_acumulado = c(0, tabla_frec$`% acumulado`))
+
+ggplot(ojiva, aes(x = limite, y = pct_acumulado)) +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  geom_point(color = "steelblue", size = 2) +
+  scale_x_continuous(breaks = limites) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+  labs(title = "Porcentaje acumulado de vehículos según su rendimiento (ojiva)",
+       x = "Rendimiento de combustible (millas/galón)",
+       y = "Porcentaje acumulado de vehículos (%)") +
+  theme(panel.grid.minor = element_blank())
+```
+
+### Forma de la distribución
+
+```{r forma-distribucion}
+asim_mpg <- asimetria(x)
+modal <- tabla_frec[which.max(tabla_frec$fi), ]
+cat("Coeficiente de asimetría:", round(asim_mpg, 2), "\n")
+cat("Intervalo con mayor frecuencia:", as.character(modal$Intervalo),
+    "(", modal$fi, "vehículos,", round(modal$`%`, 2), "% )\n")
+```
+
+```{r atipicos-mpg}
+q1 <- quantile(x, 0.25)
+q3 <- quantile(x, 0.75)
+ric <- q3 - q1
+lim_inf <- q1 - 1.5 * ric
+lim_sup <- q3 + 1.5 * ric
+atipicos <- x[x < lim_inf | x > lim_sup]
+cat("Límites de atípicos (1.5·RIC): [", lim_inf, ",", lim_sup, "]\n")
+cat("Número de valores atípicos:", length(atipicos), "\n")
+```
+
+**Análisis de la forma de la distribución:**
+
+- **¿Es simétrica o sesgada?** Sesgada a la derecha: el coeficiente de asimetría es `r fmt(asim_mpg)` y la media (`r fmt(media)`) es mayor que la mediana (`r mediana`).
+- **¿Hacia qué lado se concentra la mayor frecuencia?** Hacia la izquierda, en los rendimientos bajos. El intervalo `r modal$Intervalo` concentra `r modal$fi` vehículos (`r fmt(modal$"%")` %), y la cola se extiende hacia los valores altos.
+- **¿Hay valores atípicos visibles?** No con el criterio de 1.5·RIC. Los límites son [`r lim_inf`, `r lim_sup`] mpg, y el valor máximo (`r maximo` mpg) queda apenas por debajo del límite superior. En el histograma solo se ve una cola derecha con pocos autos muy eficientes.
+
+---
+
+## Paso 4: Interpretación de Resultados (Requerimiento Obligatorio)
+
+**Interpretación:**
+
+**Contexto de la variable:** `mpg` mide el rendimiento de combustible, es decir, cuántas millas recorre un vehículo por cada galón de combustible. A mayor valor, más eficiente es el auto. Se analizaron `r n` vehículos de los modelos 1970 a 1982, con rendimientos entre `r minimo` y `r maximo` millas/galón.
+
+**Tendencia central:** La media (`r fmt(media)` mpg) y la mediana (`r mediana` mpg) son muy parecidas, por lo que el rendimiento típico de un auto del dataset ronda las 23 millas/galón. La media es ligeramente mayor porque unos pocos autos muy eficientes, en la cola derecha, la elevan, mientras que la mediana no se ve afectada por esos valores extremos. Esa pequeña diferencia es consistente con el sesgo a la derecha que muestra el histograma.
+
+**Dispersión:** La desviación estándar es de `r fmt(desv)` mpg, sobre un rango de `r fmt(rango, 1)` mpg. El coeficiente de variación de `r fmt(cv)` % indica una variabilidad relativa moderada-alta: la desviación típica equivale a un tercio del rendimiento promedio. El rendimiento no es homogéneo, porque el dataset reúne vehículos muy distintos entre sí en motor, peso y año del modelo.
+
+**Conclusión general:** La mayoría de los vehículos del dataset tiene un rendimiento bajo a moderado. Abundan los autos de 13 a 20 millas/galón, y los muy eficientes (más de 35 mpg) son pocos. La distribución sesgada a la derecha y la alta dispersión sugieren que el rendimiento depende de las características del vehículo, por lo que conviene analizar `mpg` por grupos (cilindros, origen y año) para explicar esas diferencias.
+
+---
+
+## Paso 5: Preguntas de Reflexión
+
+**1. ¿Qué información aporta la ojiva (gráfico de líneas sobre el porcentaje acumulado) que no aporta el histograma?**
+
+La ojiva muestra el porcentaje de vehículos que queda por debajo de cada valor de `mpg`. Así se pueden leer directamente posiciones relativas como la mediana, los cuartiles o los percentiles, y responder preguntas como "¿qué porcentaje de autos rinde menos de `r limites[5]` mpg?" (`r fmt(tabla_frec$"% acumulado"[4])` %). El histograma solo muestra cuántos vehículos hay en cada intervalo, no cómo se van acumulando.
+
+**2. Si tuviera que comparar dos modelos de autos (p. ej., 4 vs 8 cilindros), ¿cómo usaría las tablas de frecuencia para hacerlo?**
+
+```{r comparacion-4-8}
+grupos_4_8 <- auto %>% filter(cylinders %in% c(4, 8))
+table(grupos_4_8$cylinders)
+
+comparacion_4_8 <- prop.table(table(cut(grupos_4_8$mpg, breaks = limites, right = FALSE),
+                                    grupos_4_8$cylinders), margin = 2) * 100
+kable(data.frame(Intervalo = rownames(comparacion_4_8),
+                 `4 cilindros (%)` = comparacion_4_8[, "4"],
+                 `8 cilindros (%)` = comparacion_4_8[, "8"],
+                 check.names = FALSE),
+      digits = 2, row.names = FALSE)
+
+# Porcentaje acumulado por debajo de 20.4 mpg (tres primeros intervalos)
+acum_4_8 <- colSums(comparacion_4_8[1:3, ])
+```
+
+Construiría una tabla para cada grupo con los mismos intervalos de clase y compararía las frecuencias relativas (%) en lugar de las absolutas, porque los grupos tienen distinto tamaño (`r sum(grupos_4_8$cylinders == 4)` y `r sum(grupos_4_8$cylinders == 8)` vehículos). En la tabla anterior, el `r fmt(comparacion_4_8[2, "8"])` % de los autos de 8 cilindros está en [12.8, 16.6) y ninguno llega a 28 mpg, mientras que los de 4 cilindros se concentran entre 24.2 y 31.8 mpg (`r fmt(sum(comparacion_4_8[5:6, "4"]))` %). Las frecuencias acumuladas también ayudan: el `r fmt(acum_4_8[["8"]])` % de los autos de 8 cilindros rinde menos de 20.4 mpg, frente a solo el `r fmt(acum_4_8[["4"]])` % de los de 4.
+
+## Paso 6: Análisis Comparativo
+
+### Pregunta 1: ¿Existen diferencias en el rendimiento (`mpg`) según el número de cilindros?
+
+**Tipo de análisis:** Comparación entre grupos
+
+```{r resumen-cilindros}
+resumen_cil <- auto %>%
+  group_by(Cilindros = cylinders) %>%
+  summarise(n = n(),
+            Media = mean(mpg),
+            Mediana = median(mpg),
+            s = sd(mpg),
+            Q1 = quantile(mpg, 0.25),
+            Q3 = quantile(mpg, 0.75),
+            RIC = IQR(mpg),
+            .groups = "drop")
+kable(resumen_cil, digits = 2)
+
+# Valores por número de cilindros para el texto
+cil <- function(columna, c) resumen_cil[[columna]][resumen_cil$Cilindros == c]
+
+# Autos de 3 cilindros
+auto %>% filter(cylinders == 3) %>% select(name, year, origen, mpg)
+```
+
+**Gráfico generado:**
+
+```{r boxplot-cilindros, fig.width=9, fig.height=5}
+etiquetas_cil <- setNames(paste0(resumen_cil$Cilindros, "\n(n=", resumen_cil$n, ")"),
+                          resumen_cil$Cilindros)
+
+ggplot(auto, aes(x = cilindros, y = mpg)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  scale_x_discrete(labels = etiquetas_cil) +
+  coord_cartesian(ylim = c(0, 50)) +
+  labs(title = "Rendimiento de combustible según el número de cilindros",
+       x = "Número de cilindros",
+       y = "Rendimiento de combustible (millas/galón)")
+```
+
+**Preguntas de interpretación:**
+
+**1. ¿Cómo varía la mediana de mpg al aumentar el número de cilindros?**
+
+Disminuye de forma marcada a partir de 4 cilindros: `r fmt(cil("Mediana", 4))` mpg (4), `r fmt(cil("Mediana", 5))` (5), `r fmt(cil("Mediana", 6))` (6) y `r fmt(cil("Mediana", 8))` (8). Los autos de 3 cilindros (mediana `r fmt(cil("Mediana", 3))`) rompen la tendencia, pero son solo `r cil("n", 3)` Mazda RX con motor rotativo.
+
+**2. ¿Qué grupo presenta mayor dispersión? ¿A qué podría deberse?**
+
+Entre los grupos con suficientes datos, el de 4 cilindros (s = `r fmt(cil("s", 4))`, RIC = `r fmt(cil("RIC", 4))`). Es el grupo más numeroso (`r cil("n", 4)` autos) y el más variado: incluye autos de los tres orígenes, de todos los años y algunos diésel muy eficientes. El de 5 cilindros tiene s = `r fmt(cil("s", 5))`, pero con solo `r cil("n", 5)` autos no es representativo.
+
+**3. ¿Hay solapamiento entre las cajas? ¿Qué implica estadísticamente?**
+
+Las cajas de 4, 6 y 8 cilindros no se solapan: el Q1 de 4 cilindros (`r fmt(cil("Q1", 4))`) es mayor que el Q3 de 6 cilindros (`r fmt(cil("Q3", 6))`), y el Q1 de 6 cilindros (`r fmt(cil("Q1", 6))`) es mayor que el Q3 de 8 cilindros (`r fmt(cil("Q3", 8))`). Esto sugiere diferencias reales entre sus medianas. Las cajas de 3 y 5 cilindros sí se solapan con otras, pero su tamaño no permite sacar conclusiones.
+
+**4. Formula una hipótesis que luego podrías contrastar con ANOVA.**
+H₀: el rendimiento medio es igual en los grupos de 4, 6 y 8 cilindros (μ₄ = μ₆ = μ₈).
+
+H₁: al menos un grupo tiene un rendimiento medio distinto.
+
+**Interpretación técnica:**
+
+El número de cilindros tiene una relación inversa clara con el rendimiento: al pasar de 4 a 8 cilindros, la media cae de `r fmt(cil("Media", 4))` a `r fmt(cil("Media", 8))` mpg. Los grupos de 6 y 8 cilindros son más homogéneos (s = `r fmt(cil("s", 6))` y `r fmt(cil("s", 8))`), pero presentan asimetría a la derecha con algunos atípicos altos. Los grupos de 3 y 5 cilindros deberían excluirse o agruparse en un análisis inferencial por su tamaño muestral.
+
+---
+
+### Pregunta 2: ¿Existen diferencias significativas en el rendimiento según el país de origen (`origin`)?
+
+**Tipo de análisis:** Comparación entre grupos
+
+```{r resumen-origen}
+resumen_origen <- auto %>%
+  group_by(Origen = origen) %>%
+  summarise(n = n(),
+            Media = mean(mpg),
+            Mediana = median(mpg),
+            s = sd(mpg),
+            Varianza = var(mpg),
+            Asimetría = asimetria(mpg),
+            Q1 = quantile(mpg, 0.25),
+            Q3 = quantile(mpg, 0.75),
+            .groups = "drop")
+kable(resumen_origen, digits = 2)
+
+# Valores por origen para el texto
+ori <- function(columna, o) resumen_origen[[columna]][resumen_origen$Origen == o]
+```
+
+**Gráfico generado:**
+
+```{r boxplot-origen, fig.width=9, fig.height=5}
+ggplot(auto, aes(x = origen, y = mpg)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  coord_cartesian(ylim = c(0, 50)) +
+  labs(title = "Rendimiento de combustible según el país de origen",
+       x = "País de origen",
+       y = "Rendimiento de combustible (millas/galón)")
+```
+
+#### Posibles variables de confusión
+
+```{r confusores-origen}
+confusores <- auto %>%
+  group_by(Origen = origen) %>%
+  summarise(`Peso (lb)` = mean(weight),
+            `Potencia (hp)` = mean(horsepower),
+            `Cilindrada (pulg³)` = mean(displacement),
+            .groups = "drop")
+kable(confusores, digits = 1)
+
+auto %>%
+  count(Origen = origen, cylinders) %>%
+  pivot_wider(names_from = cylinders, values_from = n, values_fill = 0) %>%
+  kable(caption = "Número de vehículos por origen y número de cilindros")
+```
+
+**Preguntas de interpretación:**
+
+**1. ¿Qué origen tiene mejor rendimiento promedio? ¿Y peor?**
+
+Mejor: Japón (`r fmt(ori("Media", "Japón"))` mpg). Peor: EE. UU. (`r fmt(ori("Media", "EE. UU."))` mpg). Europa queda en medio (`r fmt(ori("Media", "Europa"))` mpg).
+
+**2. ¿La forma de las distribuciones es similar entre orígenes?**
+
+No del todo. EE. UU. (asimetría `r fmt(ori("Asimetría", "EE. UU."))`) y Europa (`r fmt(ori("Asimetría", "Europa"))`) están sesgadas a la derecha, con la media por encima de la mediana. Japón es prácticamente simétrica (`r fmt(ori("Asimetría", "Japón"))`).
+
+**3. ¿Los datos sugieren igualdad de varianzas entre grupos?**
+
+Sí. Las desviaciones estándar son parecidas (`r fmt(ori("s", "EE. UU."))`, `r fmt(ori("s", "Europa"))` y `r fmt(ori("s", "Japón"))`), y la varianza mayor (`r fmt(max(resumen_origen$Varianza))`) es solo `r fmt(max(resumen_origen$Varianza) / min(resumen_origen$Varianza))` veces la menor (`r fmt(min(resumen_origen$Varianza))`).
+
+**4. ¿Qué otros factores podrían estar confundiendo la comparación (variables de confusión)?**
+
+El peso, la potencia, la cilindrada y el número de cilindros. Los autos de EE. UU. pesan en promedio `r fmt(confusores$"Peso (lb)"[1], 0)` lb, frente a `r fmt(confusores$"Peso (lb)"[2], 0)` lb en Europa y `r fmt(confusores$"Peso (lb)"[3], 0)` lb en Japón. También tienen más del doble de cilindrada y son los únicos con 8 cilindros (`r sum(auto$cylinders == 8)` autos). Parte de la diferencia por origen se debe al tipo de vehículo que fabrica cada región.
+
+**Interpretación técnica:**
+
+Descriptivamente sí hay diferencias marcadas: las medias de Japón y EE. UU. difieren en `r fmt(ori("Media", "Japón") - ori("Media", "EE. UU."))` mpg, y la caja de EE. UU. (Q3 = `r fmt(ori("Q3", "EE. UU."))`) queda casi por debajo de las de Europa y Japón. Como las varianzas son similares, el supuesto de homocedasticidad de un ANOVA parece razonable. Sin embargo, la comparación no es directa, porque el origen está muy asociado al tamaño del motor y al peso del vehículo. Para confirmar que la diferencia es estadísticamente significativa se requiere un ANOVA.
+
+---
+
+### Pregunta 3: ¿Cómo interactúan el origen y el número de cilindros sobre el rendimiento?
+
+**Tipo de análisis:** Comparación multivariada categórica
+
+```{r resumen-interaccion}
+medias_interaccion <- auto %>%
+  group_by(cylinders, origen) %>%
+  summarise(n = n(), media = mean(mpg), .groups = "drop")
+
+medias_interaccion %>%
+  select(Cilindros = cylinders, origen, media) %>%
+  pivot_wider(names_from = origen, values_from = media) %>%
+  kable(digits = 2, caption = "Rendimiento promedio (mpg) por cilindros y origen")
+
+# Media de mpg para una combinación de cilindros y origen
+media_int <- function(c, o) medias_interaccion$media[medias_interaccion$cylinders == c &
+                                                      medias_interaccion$origen == o]
+caida_4_6 <- sapply(levels(auto$origen), function(o) media_int(4, o) - media_int(6, o))
+```
+
+**Gráfico generado:**
+
+```{r interaccion-cilindros-origen, fig.width=9, fig.height=5}
+# Se excluyen 3 y 5 cilindros por tener solo 4 y 3 autos
+medias_interaccion %>%
+  filter(cylinders %in% c(4, 6, 8)) %>%
+  ggplot(aes(x = factor(cylinders), y = media, color = origen, group = origen)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 3) +
+  scale_color_manual(values = colores_origen) +
+  scale_y_continuous(limits = c(0, 40)) +
+  labs(title = "Rendimiento promedio por número de cilindros y país de origen (4, 6 y 8 cilindros)",
+       x = "Número de cilindros",
+       y = "Rendimiento promedio (millas/galón)",
+       color = "Origen")
+```
+
+**Preguntas de interpretación:**
+
+**1. ¿El efecto de los cilindros sobre `mpg` es constante entre orígenes?**
+
+Casi constante. De 4 a 6 cilindros, el rendimiento cae `r fmt(caida_4_6[["EE. UU."]])` mpg en EE. UU., `r fmt(caida_4_6[["Europa"]])` en Europa y `r fmt(caida_4_6[["Japón"]])` en Japón. Las líneas son prácticamente paralelas, por lo que la interacción es débil.
+
+**2. ¿Algún origen tiene un comportamiento diferenciado?**
+
+Japón: con el mismo número de cilindros rinde más que EE. UU. y Europa (`r fmt(media_int(4, "Japón"))` vs. `r fmt(media_int(4, "EE. UU."))` y `r fmt(media_int(4, "Europa"))` mpg con 4 cilindros; `r fmt(media_int(6, "Japón"))` vs. `r fmt(media_int(6, "EE. UU."))` y `r fmt(media_int(6, "Europa"))` con 6). Además, sus autos de 3 cilindros (Mazda RX con motor rotativo, excluidos del gráfico por ser solo 4) rinden menos que los de 4 cilindros. EE. UU. es el único origen con autos de 8 cilindros, por lo que su línea es la única que llega a ese punto.
+
+**3. ¿Qué ventajas tiene este gráfico respecto a los anteriores?**
+
+Muestra dos factores a la vez y permite separar sus efectos. Con 4 cilindros, la diferencia entre EE. UU. y Europa casi desaparece (`r fmt(media_int(4, "EE. UU."))` vs. `r fmt(media_int(4, "Europa"))` mpg). Esto revela que gran parte de la brecha de la Pregunta 2 se explica por el número de cilindros y no por el origen.
+
+**Interpretación técnica:**
+
+El número de cilindros es el factor dominante sobre el rendimiento, y su efecto es similar en los tres orígenes. El origen tiene un efecto menor, pero consistente, a favor de Japón. Hay que considerar que las medias de 6 cilindros de Europa (`r medias_interaccion$n[medias_interaccion$cylinders == 6 & medias_interaccion$origen == "Europa"]` autos) y Japón (`r medias_interaccion$n[medias_interaccion$cylinders == 6 & medias_interaccion$origen == "Japón"]` autos) se basan en pocos datos. Un ANOVA de dos factores debería tomar en cuenta que el diseño está desbalanceado y que faltan combinaciones (Europa y Japón no tienen autos de 8 cilindros).
+
+---
+
+### Pregunta 4: ¿Cómo ha cambiado la composición de cilindros y orígenes por año?
+
+**Tipo de análisis:** Composición por categorías en el tiempo
+
+```{r composicion-anual}
+comp_origen <- auto %>%
+  count(year, origen) %>%
+  group_by(year) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ungroup()
+
+comp_cilindros <- auto %>%
+  count(year, cilindros) %>%
+  group_by(year) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ungroup()
+
+# Porcentaje de un grupo en un año (0 si no hay autos de ese grupo)
+pct_anual <- function(tabla, columna, a, valor) {
+  p <- tabla$pct[tabla$year == a & tabla[[columna]] == valor]
+  if (length(p) == 0) 0 else p
+}
+```
+
+**Gráfico generado:**
+
+```{r composicion-por-anio, fig.width=10, fig.height=9}
+g_origen <- ggplot(comp_origen, aes(x = factor(1900 + year), y = pct, fill = origen)) +
+  geom_col(width = 0.85) +
+  scale_fill_manual(values = colores_origen) +
+  scale_y_continuous(limits = c(0, 100.01), breaks = seq(0, 100, 20)) +
+  labs(title = "Composición de vehículos por país de origen y año del modelo",
+       x = NULL,
+       y = "Porcentaje de vehículos (%)",
+       fill = "Origen")
+
+g_cilindros <- ggplot(comp_cilindros, aes(x = factor(1900 + year), y = pct, fill = cilindros)) +
+  geom_col(width = 0.85) +
+  scale_fill_viridis_d() +
+  scale_y_continuous(limits = c(0, 100.01), breaks = seq(0, 100, 20)) +
+  labs(title = "Composición de vehículos por número de cilindros y año del modelo",
+       x = "Año del modelo",
+       y = "Porcentaje de vehículos (%)",
+       fill = "Cilindros")
+
+grid.arrange(g_origen, g_cilindros, ncol = 1)
+```
+
+```{r tablas-composicion}
+comp_origen %>%
+  select(Año = year, origen, pct) %>%
+  pivot_wider(names_from = origen, values_from = pct, values_fill = 0) %>%
+  kable(digits = 1, caption = "Porcentaje de vehículos por origen y año")
+
+comp_cilindros %>%
+  select(Año = year, cilindros, pct) %>%
+  pivot_wider(names_from = cilindros, values_from = pct, values_fill = 0) %>%
+  kable(digits = 1, caption = "Porcentaje de vehículos por número de cilindros y año")
+
+mpg_anual <- auto %>%
+  group_by(Año = year) %>%
+  summarise(`mpg promedio` = mean(mpg), .groups = "drop")
+kable(mpg_anual, digits = 2, caption = "Rendimiento promedio por año del modelo")
+
+mpg_anio <- function(a) mpg_anual$`mpg promedio`[mpg_anual$Año == a]
+pct_eeuu_70_79 <- range(comp_origen$pct[comp_origen$origen == "EE. UU." & comp_origen$year <= 79])
+pct_europa_70_79 <- range(comp_origen$pct[comp_origen$origen == "Europa" & comp_origen$year <= 79])
+```
+
+**Preguntas de interpretación:**
+
+**1. ¿Cómo ha evolucionado la participación de cada origen por año?**
+
+EE. UU. domina de 1970 a 1979 (entre `r fmt(pct_eeuu_70_79[1], 1)` % y `r fmt(pct_eeuu_70_79[2], 1)` %), pero cae a `r fmt(pct_anual(comp_origen, "origen", 80, "EE. UU."), 1)` % en 1980 y `r fmt(pct_anual(comp_origen, "origen", 81, "EE. UU."), 1)` % en 1981, para recuperarse a `r fmt(pct_anual(comp_origen, "origen", 82, "EE. UU."), 1)` % en 1982. Japón pasa de `r fmt(pct_anual(comp_origen, "origen", 70, "Japón"), 1)` % en 1970 a `r fmt(pct_anual(comp_origen, "origen", 80, "Japón"), 1)` % en 1980, y se mantiene alto en 1981 (`r fmt(pct_anual(comp_origen, "origen", 81, "Japón"), 1)` %). Europa se mantiene entre `r fmt(pct_europa_70_79[1], 1)` % y `r fmt(pct_europa_70_79[2], 1)` % hasta 1979, con un pico de `r fmt(pct_anual(comp_origen, "origen", 80, "Europa"), 1)` % en 1980 y su mínimo en 1982 (`r fmt(pct_anual(comp_origen, "origen", 82, "Europa"), 1)` %).
+
+**2. ¿Disminuyó la presencia de vehículos con 8 cilindros con los años?**
+
+Sí. Pasó de `r fmt(pct_anual(comp_cilindros, "cilindros", 70, "8"), 1)` % en 1970 a `r fmt(pct_anual(comp_cilindros, "cilindros", 80, "8"), 1)` % en 1980 y 1982 (`r fmt(pct_anual(comp_cilindros, "cilindros", 81, "8"), 1)` % en 1981). Al mismo tiempo, los autos de 4 cilindros crecieron de `r fmt(pct_anual(comp_cilindros, "cilindros", 70, "4"), 1)` % a `r fmt(pct_anual(comp_cilindros, "cilindros", 82, "4"), 1)` %.
+
+**3. ¿Qué relación encuentras entre este gráfico y la tendencia de `mpg` del Bloque I?**
+
+El rendimiento promedio sube de `r fmt(mpg_anio(70))` mpg en 1970 a `r fmt(mpg_anio(80))` mpg en 1980, y se mantiene por encima de 30 mpg hasta 1982. Este aumento coincide con la desaparición de los autos de 8 cilindros y con el crecimiento de los autos de 4 cilindros y de los japoneses, que son los más eficientes según las preguntas anteriores.
+
+**Interpretación técnica:**
+
+La composición del dataset cambia mucho con el tiempo: los autos más recientes tienen menos cilindros y hay una mayor participación japonesa. El salto más fuerte ocurre a partir de 1980, cuando los autos de 8 cilindros prácticamente desaparecen. Esto implica que el año del modelo también es una variable de confusión: parte de las diferencias por cilindros y por origen podría deberse a la época de fabricación.
+
+## Paso 7: Diseño de su Propio Análisis
+
+**Pregunta de análisis propuesta:**
+
+¿Cómo se relaciona el peso del vehículo con su rendimiento, y cambia esta relación según el país de origen?
+
+---
+
+**Variables involucradas:**
+
+- **Eje X:** `weight` (peso del vehículo, lb)
+- **Eje Y:** `mpg` (rendimiento de combustible, millas/galón)
+- **Color/grupo:** `origin` (país de origen)
+
+**Tipo de gráfico seleccionado y justificación:**
+
+Diagrama de dispersión con una recta de tendencia por origen. El peso y el rendimiento son variables cuantitativas continuas, por lo que la dispersión es el gráfico adecuado para ver la forma y la fuerza de su relación. El color por origen y las rectas de tendencia permiten comparar la relación entre grupos y ver si la diferencia de rendimiento entre orígenes se mantiene a igual peso.
+
+```{r relacion-peso-mpg}
+tendencia <- function(d) {
+  modelo <- lm(mpg ~ weight, data = d)
+  data.frame(n = nrow(d),
+             r = cor(d$weight, d$mpg),
+             cambio_1000 = coef(modelo)[["weight"]] * 1000,
+             mpg_2500 = predict(modelo, data.frame(weight = 2500)),
+             peso_min = min(d$weight),
+             peso_max = max(d$weight))
+}
+
+relacion <- do.call(rbind, c(lapply(split(auto, auto$origen), tendencia), list(tendencia(auto))))
+rownames(relacion) <- c(levels(auto$origen), "Total")
+kable(relacion, digits = 2,
+      col.names = c("n", "r (peso vs mpg)", "Cambio en mpg por cada 1000 lb",
+                    "mpg estimado a 2500 lb", "Peso mínimo (lb)", "Peso máximo (lb)"))
+```
+
+```{r dispersion-peso-mpg, fig.width=9, fig.height=6}
+ggplot(auto, aes(x = weight, y = mpg, color = origen)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+  scale_color_manual(values = colores_origen) +
+  scale_y_continuous(limits = c(0, 50)) +
+  labs(title = "Relación entre peso y rendimiento de combustible por país de origen",
+       x = "Peso del vehículo (lb)",
+       y = "Rendimiento de combustible (millas/galón)",
+       color = "Origen")
+```
+
+---
+
+**Interpretación técnica (mínimo 6 líneas):**
+
+Existe una relación negativa fuerte entre el peso y el rendimiento (r = `r fmt(relacion["Total", "r"])`): en promedio, cada 1000 lb adicionales reducen el rendimiento en unas `r fmt(abs(relacion["Total", "cambio_1000"]), 1)` mpg.
+
+La relación es más fuerte en EE. UU. (r = `r fmt(relacion["EE. UU.", "r"])`), que también tiene el mayor rango de pesos (`r fmt(relacion["EE. UU.", "peso_min"], 0)` a `r fmt(relacion["EE. UU.", "peso_max"], 0)` lb), y más moderada en Europa (`r fmt(relacion["Europa", "r"])`) y Japón (`r fmt(relacion["Japón", "r"])`).
+
+Los autos japoneses son los más sensibles al peso (`r fmt(relacion["Japón", "cambio_1000"])` mpg por cada 1000 lb), aunque ninguno supera las `r fmt(relacion["Japón", "peso_max"], 0)` lb.
+
+A un mismo peso de 2,500 lb, el rendimiento estimado es muy parecido entre orígenes: `r fmt(relacion["EE. UU.", "mpg_2500"])` mpg en EE. UU., `r fmt(relacion["Europa", "mpg_2500"])` en Europa y `r fmt(relacion["Japón", "mpg_2500"])` en Japón.
+
+Es decir, la brecha de `r fmt(ori("Media", "Japón") - ori("Media", "EE. UU."))` mpg observada en la Pregunta 2 se reduce a unas `r fmt(relacion["Japón", "mpg_2500"] - relacion["EE. UU.", "mpg_2500"])` mpg al comparar autos de peso similar.
+
+Esto confirma que el peso es una variable de confusión importante: los autos estadounidenses rinden menos principalmente porque son más pesados, y no solo por su origen.
+
+La nube de puntos muestra además cierta curvatura (el rendimiento cae más rápido en pesos bajos), por lo que un modelo no lineal podría ajustarse mejor.
+
+---
+
+## Matriz de Autoevaluación de Gráficos
+
+```{r matriz-autoevaluacion}
+graficos <- c("Histograma", "Ojiva", "P1 Cilindros", "P2 Origen",
+              "P3 Interacción", "P4 Composición", "P7 Peso vs mpg")
+criterios <- c(
+  "El título describe qué se muestra (no solo \"Gráfico de mpg\")",
+  "Los ejes tienen etiquetas con unidades",
+  "La escala del eje Y comienza en cero (cuando aplica)",
+  "El uso del color es informativo, no decorativo",
+  "Se incluye leyenda cuando hay múltiples grupos",
+  "No hay \"chartjunk\" (elementos innecesarios)",
+  "El tipo de gráfico corresponde a la naturaleza de las variables"
+)
+evaluacion <- rbind(
+  c("✔", "✔", "✔", "✔", "✔", "✔", "✔"),
+  c("✔", "✔", "✔", "✔", "✔", "✔", "✔"),
+  c("✔", "✔", "✔", "✔", "✔", "✔", "✔"),
+  c("✔", "✔", "✔", "✔", "✔", "✔", "✔"),
+  c("✔", "N/A", "N/A", "N/A", "✔", "✔", "✔"),
+  c("✔", "✔", "✔", "✔", "✔", "✔", "✔"),
+  c("✔", "✔", "✔", "✔", "✔", "✔", "✔")
+)
+comentarios <- c(
+  "Cada título indica la variable y la comparación que se muestra.",
+  "mpg en millas/galón, peso en lb y frecuencias en número de vehículos o %; cilindros, origen y año no tienen unidad.",
+  "Todos los ejes Y inician en 0, incluidos boxplots, líneas y dispersión.",
+  "Un solo color cuando no hay grupos; el color distingue media/mediana, origen o cilindros (escala ordinal viridis).",
+  "N/A: la ojiva y los boxplots de P1 y P2 tienen una sola serie o los grupos están en el eje X.",
+  "Sin fondos, 3D ni efectos; solo una cuadrícula tenue de theme_minimal para facilitar la lectura.",
+  "Histograma y ojiva para una variable continua, boxplots para grupos, líneas para la interacción, barras apiladas para composición y dispersión para dos continuas."
+)
+matriz <- data.frame(Criterio = criterios, evaluacion, Comentario = comentarios)
+names(matriz) <- c("Criterio", graficos, "Comentario")
+kable(matriz)
+```
